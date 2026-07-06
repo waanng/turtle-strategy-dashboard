@@ -393,12 +393,26 @@ def run_all_stocks(data_dict, params=None):
                 signals.append({'date': str(row['date']), 'type': 'EXIT', 'price': float(row['close'])})
 
         # 净值曲线 JSON
+        # 计算策略平均仓位占比（用于等仓位基准）
+        if len(eq_df) > 0 and 'position_value' in eq_df.columns and 'total_equity' in eq_df.columns:
+            avg_pos_pct = np.mean(eq_df['position_value'] / eq_df['total_equity'].replace(0, np.nan))
+            avg_pos_pct = float(avg_pos_pct) if not np.isnan(avg_pos_pct) else 0
+        else:
+            avg_pos_pct = 0
+
+        # 等仓位基准：同样仓位比例买入持有（剩余现金不动）
+        first_close = eq_df['close'].iloc[0] if len(eq_df) > 0 else 1
+        equalpos = params['initial_capital'] * (1 - avg_pos_pct) + \
+                   params['initial_capital'] * avg_pos_pct * (eq_df['close'] / first_close)
+
         equity_data = {
             'labels': eq_df['date'].tolist() if len(eq_df) > 0 else [],
             'strategy_equity': eq_df['total_equity'].tolist() if len(eq_df) > 0 else [],
-            'benchmark_equity': (params['initial_capital'] * (1 + (eq_df['close'] - eq_df['close'].iloc[0]) / eq_df['close'].iloc[0])).tolist() if len(eq_df) > 0 else [],
+            'benchmark_equity': (params['initial_capital'] * (1 + (eq_df['close'] - first_close) / first_close)).tolist() if len(eq_df) > 0 else [],
+            'equalpos_benchmark': equalpos.tolist() if len(eq_df) > 0 else [],
             'drawdown': ((eq_df['total_equity'] - eq_df['total_equity'].expanding().max()) / eq_df['total_equity'].expanding().max()).tolist() if len(eq_df) > 0 else [],
             'atr': eq_df['atr'].tolist() if len(eq_df) > 0 and 'atr' in eq_df.columns else [],
+            'avg_position_pct': avg_pos_pct,
         }
 
         results[ts_code] = {

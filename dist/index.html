@@ -432,10 +432,15 @@ async function loadChart(tsCode) {
           borderColor: '#ef4444', backgroundColor: 'transparent',
           borderWidth: 2, pointRadius: 0, tension: 0.1,
         }, {
-          label: '买入持有基准',
+          label: '满仓买入持有',
           data: slice(data.benchmark_equity),
           borderColor: '#8b949e', backgroundColor: 'transparent',
-          borderWidth: 1, borderDash: [4,4], pointRadius: 0,
+          borderWidth: 0.8, borderDash: [3,5], pointRadius: 0,
+        }, {
+          label: '等仓位买入持有',
+          data: slice(data.equalpos_benchmark || data.benchmark_equity),
+          borderColor: '#58a6ff', backgroundColor: 'transparent',
+          borderWidth: 1.2, borderDash: [8,3], pointRadius: 0,
         }]
       },
       options: {
