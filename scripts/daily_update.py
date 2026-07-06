@@ -180,6 +180,11 @@ def main():
             'trades': res['trades'][-30:] if len(res['trades']) > 30 else res['trades'],
         })
 
+        # 详情图表数据（唐奇安通道 + 买卖点）
+        from turtle_engine import export_detail_data
+        detail = export_detail_data(data[ts_code], ts_code, params, recent_days=150)
+        save_json(os.path.join(DIST_DATA, f'{ts_code}_detail.json'), detail)
+
         print(f"  ✓ {ts_code}: equity({len(equity_data['labels'])}点) signals({len(res['signals'])}条) trades({len(res['trades'])}笔)")
 
     # 5. 更新时间戳

@@ -51,6 +51,12 @@ class IndicatorCalculator:
 
     def add_all_indicators(self, df):
         df = df.copy()
+        # 先删除可能的旧指标列，避免 rename 产生重复列
+        for col in ['entry_upper', 'entry_lower', 'exit_upper', 'exit_lower',
+                     'upper_channel', 'lower_channel', 'atr', 'tr',
+                     'prev_close', 'tr1', 'tr2', 'tr3']:
+            if col in df.columns:
+                df = df.drop(columns=[col])
         df = self.calc_atr(df)
         df = self.calc_donchian_channel(df, self.entry_period, shift=1)
         df = df.rename(columns={'upper_channel': 'entry_upper', 'lower_channel': 'entry_lower'})
@@ -405,6 +411,134 @@ def run_all_stocks(data_dict, params=None):
     return results
 
 
+def export_detail_data(df, ts_code, params=None, recent_days=150):
+    """
+    导出单只股票的详情图表数据：唐奇安通道 + ATR + 买卖点标记
+
+    Parameters
+    ----------
+    df : DataFrame
+        原始OHLCV数据
+    ts_code : str
+        标的代码
+    params : dict
+        策略参数
+    recent_days : int
+        取最近多少天的数据（图表展示用）
+
+    Returns
+    -------
+    dict
+        {
+            'labels': [...],           # 日期
+            'close': [...],            # 收盘价
+            'entry_upper': [...],      # 入场通道上轨(20日)
+            'entry_lower': [...],      # 入场通道下轨(20日)
+            'exit_upper': [...],       # 退出通道上轨(10日)
+            'exit_lower': [...],       # 退出通道下轨(10日)
+            'atr': [...],              # ATR
+            'entry_points': [{date, price}, ...],     # 入场信号点
+            'exit_points': [{date, price}, ...],      # 退出信号点
+            'add_points': [{date, price}, ...],       # 加仓点
+            'stop_points': [{date, price}, ...],      # 止损点
+        }
+    """
+    if params is None:
+        params = dict(
+            entry_period=20, exit_period=10, atr_period=20,
+            initial_capital=100000, commission_rate=0.0003, slippage=0.0001,
+            risk_fraction=0.01, add_unit_step=0.5, max_units=4, stop_multiple=2.0
+        )
+
+    # 标准化
+    cols = [c.lower() for c in df.columns]
+    df = df.copy()
+    df.columns = cols
+    df['date'] = pd.to_datetime(df['date'])
+    df = df.sort_values('date').reset_index(drop=True)
+
+    # 生成信号（generate_signals 内部会通过 calc.add_all_indicators 完成指标计算）
+    sig_gen = TurtleSignalGenerator(
+        entry_period=params['entry_period'],
+        exit_period=params['exit_period'],
+        atr_period=params['atr_period'],
+        add_unit_step=params['add_unit_step'],
+        max_units=params['max_units'],
+        stop_multiple=params['stop_multiple']
+    )
+    df = sig_gen.generate_signals(df)
+
+    # 运行回测以获取交易记录（含加仓/止损）
+    engine = BacktestEngine(**{k: v for k, v in params.items()
+                               if k in ['initial_capital', 'commission_rate', 'slippage',
+                                         'risk_fraction', 'add_unit_step', 'max_units',
+                                         'stop_multiple', 'entry_period', 'exit_period', 'atr_period']})
+    _, trades_df = engine.run(df, ts_code)
+
+    # 收集信号点
+    entry_points = []
+    exit_points = []
+    add_points = []
+    stop_points = []
+
+    for _, row in df.iterrows():
+        if row.get('entry_signal') == 1:
+            entry_points.append({
+                'date': str(row['date']),
+                'price': float(row['close'])
+            })
+        if row.get('exit_signal') == 1:
+            exit_points.append({
+                'date': str(row['date']),
+                'price': float(row['close'])
+            })
+
+    # 从交易记录中提取加仓和止损
+    for _, trade in trades_df.iterrows():
+        if trade.get('stop_loss_triggered'):
+            stop_points.append({
+                'date': str(trade['exit_date']),
+                'price': float(trade['exit_price'])
+            })
+        # 加仓：同一天有多个unit_id的入场
+        # 我们通过entry_date分组来识别加仓
+    # 加仓点：通过entry_date分组，同一天出现多次入场即为加仓
+    if len(trades_df) > 0:
+        entry_date_counts = trades_df['entry_date'].value_counts()
+        for ed, count in entry_date_counts.items():
+            if count > 1:
+                # 这是加仓日
+                row = trades_df[trades_df['entry_date'] == ed].iloc[0]
+                add_points.append({
+                    'date': str(ed),
+                    'price': float(row['entry_price'])
+                })
+
+    # 取最近 recent_days 天的数据
+    df_recent = df.tail(recent_days).copy()
+
+    # 过滤信号点到最近 recent_days 天
+    cutoff_date = df_recent['date'].iloc[0]
+    entry_points = [p for p in entry_points if p['date'] >= str(cutoff_date)]
+    exit_points = [p for p in exit_points if p['date'] >= str(cutoff_date)]
+    add_points = [p for p in add_points if p['date'] >= str(cutoff_date)]
+    stop_points = [p for p in stop_points if p['date'] >= str(cutoff_date)]
+
+    return {
+        'labels': [str(d) for d in df_recent['date'].tolist()],
+        'close': [float(v) if not pd.isna(v) else None for v in df_recent['close'].tolist()],
+        'entry_upper': [float(v) if not pd.isna(v) else None for v in df_recent['entry_upper'].tolist()],
+        'entry_lower': [float(v) if not pd.isna(v) else None for v in df_recent['entry_lower'].tolist()],
+        'exit_upper': [float(v) if not pd.isna(v) else None for v in df_recent['exit_upper'].tolist()],
+        'exit_lower': [float(v) if not pd.isna(v) else None for v in df_recent['exit_lower'].tolist()],
+        'atr': [float(v) if not pd.isna(v) else None for v in df_recent['atr'].tolist()],
+        'entry_points': entry_points,
+        'exit_points': exit_points,
+        'add_points': add_points,
+        'stop_points': stop_points,
+    }
+
+
 if __name__ == '__main__':
     print("turtle_engine.py 加载成功")
     print("  IndicatorCalculator ✓")
@@ -413,3 +547,4 @@ if __name__ == '__main__':
     print("  BacktestEngine ✓")
     print("  MetricsCalculator ✓")
     print("  run_all_stocks() ✓")
+    print("  export_detail_data() ✓")

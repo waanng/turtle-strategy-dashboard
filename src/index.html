@@ -219,6 +219,34 @@ canvas { width:100% !important; }
 </div>
 </section>
 
+<!-- Detail Chart: 唐奇安通道 + 买卖点 -->
+<section class="section">
+<div class="section-title">🔍 交易信号详情（唐奇安通道 + 买卖点）</div>
+<div class="chart-panel">
+  <div class="chart-controls">
+    <span style="font-size:13px;color:var(--text2)">
+      标的：<strong id="detail-stock-name" style="color:var(--text)">中芯国际A</strong>
+    </span>
+    <span style="font-size:12px;color:var(--text2)">
+      通道周期：入场 <span style="color:var(--red)">20日</span> / 退出 <span style="color:var(--text2)">10日</span>
+      &nbsp;|&nbsp;
+      <span style="color:var(--red)">▲</span>入场
+      <span style="color:var(--gold)">◆</span>加仓
+      <span style="color:var(--green)">▼</span>退出
+      <span style="color:var(--purple)">✕</span>止损
+    </span>
+  </div>
+  <div style="display:flex; gap:0;">
+    <div class="chart-wrap" style="height:380px; width:75%;">
+      <canvas id="detail-chart"></canvas>
+    </div>
+    <div class="chart-wrap" style="height:380px; width:25%; border-left:1px solid var(--border); padding-left:12px;">
+      <canvas id="detail-atr-chart"></canvas>
+    </div>
+  </div>
+</div>
+</section>
+
 <!-- Signal Timeline -->
 <section class="section">
 <div class="section-title">📍 信号时间轴</div>
@@ -251,7 +279,8 @@ const TICKER_NAMES = {
 // --- State ---
 let state = {
   stocks: [], selectedCode: null, currentRange: 200,
-  chart: null, sortKey: 'sharpe_ratio', sortAsc: false
+  chart: null, sortKey: 'sharpe_ratio', sortAsc: false,
+  detailChart: null, detailATRChart: null
 };
 
 // --- Utils ---
@@ -283,6 +312,7 @@ async function init() {
     if (summary.stocks.length > 0) {
       state.selectedCode = summary.stocks[0].ts_code;
       await loadChart(state.selectedCode);
+      await loadDetailChart(state.selectedCode);
       await loadTimeline(state.selectedCode);
     }
   } catch(err) {
@@ -366,6 +396,7 @@ function populateSelector(stocks) {
   sel.onchange = async () => {
     state.selectedCode = sel.value;
     await loadChart(state.selectedCode);
+    await loadDetailChart(state.selectedCode);
     await loadTimeline(state.selectedCode);
   };
 
@@ -450,6 +481,153 @@ async function loadTimeline(tsCode) {
   } catch(err) {
     document.getElementById('signal-timeline').innerHTML =
       '<div style="text-align:center;padding:40px;color:var(--text2)">信号数据加载失败</div>';
+  }
+}
+
+// --- Detail Chart: 唐奇安通道 + 买卖点 ---
+async function loadDetailChart(tsCode) {
+  try {
+    const data = await loadJSON(tsCode + '_detail.json');
+    if (!data.labels || data.labels.length === 0) {
+      document.getElementById('detail-chart').parentElement.innerHTML =
+        '<div style="text-align:center;padding:80px;color:var(--text2)">暂无详情数据</div>';
+      return;
+    }
+
+    const labels = data.labels.map(d => d.slice(5)); // MM-DD
+    const name = TICKER_NAMES[tsCode] || tsCode;
+    document.getElementById('detail-stock-name').textContent = name;
+
+    // Destroy existing charts
+    if (state.detailChart) state.detailChart.destroy();
+    if (state.detailATRChart) state.detailATRChart.destroy();
+
+    // --- Main chart: 价格 + 通道 + 信号点 ---
+    const mainCtx = document.getElementById('detail-chart').getContext('2d');
+
+    // Convert signal points to scatter format
+    const toScatter = (pts) => pts.map(p => ({ x: (p.date||'').slice(5), y: p.price }));
+
+    state.detailChart = new Chart(mainCtx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: '收盘价', data: data.close,
+            borderColor: '#e6edf3', backgroundColor: 'transparent',
+            borderWidth: 1.5, pointRadius: 0,
+          },
+          {
+            label: '入场通道上轨(20日)', data: data.entry_upper,
+            borderColor: 'rgba(239,68,68,.6)', backgroundColor: 'transparent',
+            borderWidth: 1, borderDash: [6,3], pointRadius: 0,
+          },
+          {
+            label: '入场通道下轨(20日)', data: data.entry_lower,
+            borderColor: 'rgba(34,197,94,.6)', backgroundColor: 'transparent',
+            borderWidth: 1, borderDash: [6,3], pointRadius: 0,
+          },
+          {
+            label: '退出通道下轨(10日)', data: data.exit_lower,
+            borderColor: 'rgba(34,197,94,.3)', backgroundColor: 'transparent',
+            borderWidth: 0.8, borderDash: [2,4], pointRadius: 0,
+          },
+          {
+            label: '买入入场', type: 'scatter',
+            data: toScatter(data.entry_points),
+            backgroundColor: '#ef4444', borderColor: '#ef4444',
+            pointRadius: 8, pointStyle: 'triangle', pointHoverRadius: 12,
+          },
+          {
+            label: '退出平仓', type: 'scatter',
+            data: toScatter(data.exit_points),
+            backgroundColor: '#22c55e', borderColor: '#22c55e',
+            pointRadius: 8, pointStyle: 'triangle', rotation: 180, pointHoverRadius: 12,
+          },
+        ].concat(
+          (data.add_points||[]).length > 0 ? [{
+            label: '加仓', type: 'scatter',
+            data: toScatter(data.add_points),
+            backgroundColor: '#d2991d', borderColor: '#d2991d',
+            pointRadius: 8, pointStyle: 'diamond', pointHoverRadius: 12,
+          }] : []
+        ).concat(
+          (data.stop_points||[]).length > 0 ? [{
+            label: '止损', type: 'scatter',
+            data: toScatter(data.stop_points),
+            backgroundColor: 'transparent', borderColor: '#a371f7',
+            borderWidth: 3, pointRadius: 8, pointStyle: 'cross', pointHoverRadius: 12,
+          }] : []
+        ),
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: {
+            position: 'top',
+            labels: { color: '#8b949e', usePointStyle: true, padding: 12, font: { size: 11 }, boxWidth: 16 }
+          },
+          tooltip: {
+            callbacks: {
+              label: (ctx) => {
+                if (ctx.dataset.type === 'scatter') {
+                  return ctx.dataset.label + ': ¥' + parseFloat(ctx.raw.y).toFixed(2) + ' @ ' + ctx.raw.x;
+                }
+                return ctx.dataset.label + ': ¥' + parseFloat(ctx.raw).toFixed(2);
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            ticks: { color: '#8b949e', maxTicksLimit: 10, font: { size: 10 } },
+            grid: { color: 'rgba(48,54,61,.3)' }
+          },
+          y: {
+            ticks: { color: '#8b949e', callback: v => '¥' + v.toFixed(1), font: { size: 10 } },
+            grid: { color: 'rgba(48,54,61,.3)' }
+          }
+        }
+      }
+    });
+
+    // --- ATR sub-chart ---
+    const atrCtx = document.getElementById('detail-atr-chart').getContext('2d');
+    state.detailATRChart = new Chart(atrCtx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'ATR',
+          data: data.atr,
+          borderColor: '#d2991d', backgroundColor: 'transparent',
+          borderWidth: 1.5, pointRadius: 0, fill: false,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { color: '#8b949e', font: { size: 10 }, padding: 8 } }
+        },
+        scales: {
+          x: {
+            ticks: { color: '#8b949e', maxTicksLimit: 8, font: { size: 9 } },
+            grid: { color: 'rgba(48,54,61,.3)' }
+          },
+          y: {
+            ticks: { color: '#8b949e', font: { size: 9 } },
+            grid: { color: 'rgba(48,54,61,.3)' },
+            title: { display: true, text: 'ATR', color: '#8b949e' }
+          }
+        }
+      }
+    });
+
+  } catch(err) {
+    document.getElementById('detail-chart').parentElement.innerHTML =
+      '<div style="text-align:center;padding:80px;color:var(--text2)">详情数据加载失败: ' + err.message + '</div>';
   }
 }
 
