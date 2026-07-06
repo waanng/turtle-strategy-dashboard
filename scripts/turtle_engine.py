@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+海龟法则核心回测引擎（独立模块，零 notebook 依赖）
+可在 GitHub Actions / 本地 Python 直接运行
+"""
+
+import pandas as pd
+import numpy as np
+import json
+import os
+from datetime import datetime
+
+# =============================================================================
+# 1. IndicatorCalculator — 唐奇安通道 + ATR
+# =============================================================================
+
+class IndicatorCalculator:
+    def __init__(self, entry_period=20, exit_period=10, atr_period=20):
+        self.entry_period = entry_period
+        self.exit_period = exit_period
+        self.atr_period = atr_period
+
+    def calc_donchian_channel(self, df, period, shift=1):
+        df = df.copy()
+        df['upper_channel'] = df['high'].rolling(period).max().shift(shift)
+        df['lower_channel'] = df['low'].rolling(period).min().shift(shift)
+        return df
+
+    def calc_true_range(self, df):
+        df = df.copy()
+        df['prev_close'] = df['close'].shift(1)
+        df['tr1'] = df['high'] - df['low']
+        df['tr2'] = abs(df['high'] - df['prev_close'])
+        df['tr3'] = abs(df['low'] - df['prev_close'])
+        df['tr'] = pd.concat([df['tr1'], df['tr2'], df['tr3']], axis=1).max(axis=1)
+        return df
+
+    def calc_atr(self, df, shift=1):
+        df = df.copy()
+        if 'tr' not in df.columns:
+            df = self.calc_true_range(df)
+        df['atr'] = np.nan
+        p = self.atr_period
+        if len(df) >= p:
+            df.loc[p - 1, 'atr'] = df['tr'][:p].mean()
+            for i in range(p, len(df)):
+                df.loc[i, 'atr'] = (df.loc[i - 1, 'atr'] * (p - 1) + df.loc[i, 'tr']) / p
+        df['atr'] = df['atr'].shift(shift)
+        return df
+
+    def add_all_indicators(self, df):
+        df = df.copy()
+        df = self.calc_atr(df)
+        df = self.calc_donchian_channel(df, self.entry_period, shift=1)
+        df = df.rename(columns={'upper_channel': 'entry_upper', 'lower_channel': 'entry_lower'})
+        df = self.calc_donchian_channel(df, self.exit_period, shift=1)
+        df = df.rename(columns={'upper_channel': 'exit_upper', 'lower_channel': 'exit_lower'})
+        return df
+
+
+# =============================================================================
+# 2. TurtleSignalGenerator — 入场/退出信号
+# =============================================================================
+
+class TurtleSignalGenerator:
+    def __init__(self, entry_period=20, exit_period=10, atr_period=20,
+                 add_unit_step=0.5, max_units=4, stop_multiple=2.0):
+        self.entry_period = entry_period
+        self.exit_period = exit_period
+        self.atr_period = atr_period
+        self.add_unit_step = add_unit_step
+        self.max_units = max_units
+        self.stop_multiple = stop_multiple
+        self.calc = IndicatorCalculator(entry_period, exit_period, atr_period)
+
+    def generate_signals(self, df):
+        df = df.copy()
+        df = self.calc.add_all_indicators(df)
+        df['entry_signal'] = 0
+        df['exit_signal'] = 0
+        for i in range(self.entry_period, len(df)):
+            if df.loc[i, 'close'] > df.loc[i, 'entry_upper']:
+                df.loc[i, 'entry_signal'] = 1
+            if df.loc[i, 'close'] < df.loc[i, 'exit_lower']:
+                df.loc[i, 'exit_signal'] = 1
+        df['entry_delayed'] = df['entry_signal'].shift(1).fillna(0).astype(int)
+        df['exit_delayed'] = df['exit_signal'].shift(1).fillna(0).astype(int)
+        return df
+
+
+# =============================================================================
+# 3. PositionManager — 仓位管理
+# =============================================================================
+
+class PositionManager:
+    def __init__(self, risk_fraction=0.01, add_unit_step=0.5,
+                 max_units=4, stop_multiple=2.0, min_lot=100):
+        self.risk_fraction = risk_fraction
+        self.add_unit_step = add_unit_step
+        self.max_units = max_units
+        self.stop_multiple = stop_multiple
+        self.min_lot = min_lot
+
+    def calc_unit_size(self, equity, atr, price):
+        if atr <= 0 or price <= 0:
+            return 0
+        risk_amount = equity * self.risk_fraction
+        shares = int(risk_amount / (atr * price))
+        if shares < 1:
+            shares = 1
+        if self.min_lot > 1:
+            shares = (shares // self.min_lot) * self.min_lot
+        return max(shares, self.min_lot) if self.min_lot > 1 else max(shares, 1)
+
+    def check_stop_loss(self, positions, current_price):
+        stop_indices = []
+        for idx, pos in enumerate(positions):
+            stop_price = pos['entry_price'] - self.stop_multiple * pos['entry_atr']
+            if current_price < stop_price:
+                stop_indices.append(idx)
+        return stop_indices
+
+    def check_add_unit(self, positions, current_price, atr):
+        if len(positions) >= self.max_units or len(positions) == 0:
+            return False
+        last_price = positions[-1]['entry_price']
+        return current_price > last_price + self.add_unit_step * atr
+
+
+# =============================================================================
+# 4. BacktestEngine — 回测引擎
+# =============================================================================
+
+class BacktestEngine:
+    def __init__(self, initial_capital=100000, commission_rate=0.0003,
+                 slippage=0.0001, risk_fraction=0.01, add_unit_step=0.5,
+                 max_units=4, stop_multiple=2.0, entry_period=20,
+                 exit_period=10, atr_period=20):
+        self.initial_capital = initial_capital
+        self.commission_rate = commission_rate
+        self.slippage = slippage
+        self.max_units = max_units
+        self.signal_gen = TurtleSignalGenerator(
+            entry_period, exit_period, atr_period,
+            add_unit_step, max_units, stop_multiple
+        )
+        self.pos_mgr_defaults = dict(
+            risk_fraction=risk_fraction, add_unit_step=add_unit_step,
+            max_units=max_units, stop_multiple=stop_multiple
+        )
+
+    def run(self, df, ts_code):
+        df = self.signal_gen.generate_signals(df)
+        cash = self.initial_capital
+        positions = []
+        equity_records = []
+        trade_records = []
+
+        for i in range(self.signal_gen.entry_period, len(df)):
+            row = df.iloc[i]
+            date = row['date']
+            o, c, atr = row['open'], row['close'], row['atr']
+            entry_sig = row['entry_signal']
+            exit_sig = row['exit_signal']
+
+            if pd.isna(o) or pd.isna(c) or pd.isna(atr):
+                continue
+
+            is_a = '.SH' in ts_code or '.SZ' in ts_code
+            pm = PositionManager(min_lot=100 if is_a else 1, **self.pos_mgr_defaults)
+
+            # 止损
+            stop_idxs = pm.check_stop_loss(positions, c)
+            if stop_idxs:
+                for idx in sorted(stop_idxs, reverse=True):
+                    p = positions[idx]
+                    exec_p = o * (1 - self.slippage)
+                    gross = p['shares'] * exec_p
+                    comm = gross * self.commission_rate
+                    cash += gross - comm
+                    trade_records.append({
+                        'entry_date': str(p['entry_date']),
+                        'exit_date': str(date),
+                        'direction': 'LONG',
+                        'entry_price': p['entry_price'],
+                        'exit_price': exec_p,
+                        'shares': p['shares'],
+                        'return_pct': (exec_p - p['entry_price']) / p['entry_price'],
+                        'holding_days': (date - p['entry_date']).days,
+                        'entry_atr': p['entry_atr'],
+                        'stop_loss_triggered': True,
+                    })
+                    positions.pop(idx)
+
+            # 退出
+            if len(positions) > 0 and exit_sig:
+                for p in positions:
+                    exec_p = o * (1 - self.slippage)
+                    gross = p['shares'] * exec_p
+                    comm = gross * self.commission_rate
+                    cash += gross - comm
+                    trade_records.append({
+                        'entry_date': str(p['entry_date']),
+                        'exit_date': str(date),
+                        'direction': 'LONG',
+                        'entry_price': p['entry_price'],
+                        'exit_price': exec_p,
+                        'shares': p['shares'],
+                        'return_pct': (exec_p - p['entry_price']) / p['entry_price'],
+                        'holding_days': (date - p['entry_date']).days,
+                        'entry_atr': p['entry_atr'],
+                        'stop_loss_triggered': False,
+                    })
+                positions = []
+
+            # 入场
+            if len(positions) == 0 and entry_sig:
+                equity = cash
+                unit_shares = pm.calc_unit_size(equity, atr, o)
+                if unit_shares > 0:
+                    exec_p = o * (1 + self.slippage)
+                    cost = unit_shares * exec_p * (1 + self.commission_rate)
+                    if cost <= cash:
+                        cash -= cost
+                        positions.append({
+                            'unit_id': 1, 'entry_date': date,
+                            'entry_price': exec_p, 'shares': unit_shares, 'entry_atr': atr,
+                        })
+
+            # 加仓
+            elif 0 < len(positions) < self.max_units and pm.check_add_unit(positions, c, atr):
+                equity = cash
+                unit_shares = pm.calc_unit_size(equity, atr, o)
+                if unit_shares > 0:
+                    exec_p = o * (1 + self.slippage)
+                    cost = unit_shares * exec_p * (1 + self.commission_rate)
+                    if cost <= cash:
+                        cash -= cost
+                        positions.append({
+                            'unit_id': len(positions) + 1, 'entry_date': date,
+                            'entry_price': exec_p, 'shares': unit_shares, 'entry_atr': atr,
+                        })
+
+            # 记录净值
+            pos_value = sum(p['shares'] * c for p in positions)
+            total = cash + pos_value
+            equity_records.append({
+                'date': str(date),
+                'cash': round(cash, 2),
+                'position_value': round(pos_value, 2),
+                'total_equity': round(total, 2),
+                'close': c,
+                'atr': atr,
+                'num_units': len(positions),
+            })
+
+        return pd.DataFrame(equity_records), pd.DataFrame(trade_records)
+
+
+# =============================================================================
+# 5. MetricsCalculator — 评价指标
+# =============================================================================
+
+class MetricsCalculator:
+    def __init__(self, risk_free_rate=0.025):
+        self.rfr = risk_free_rate
+
+    def max_drawdown(self, equity_series):
+        peak = equity_series.expanding().max()
+        dd = (equity_series - peak) / peak
+        max_dd = dd.min()
+        end = dd.idxmin()
+        start = equity_series[:end].idxmax() if not pd.isna(end) else 0
+        return max_dd, start, end
+
+    def compute(self, equity_df, trades_df, initial_capital):
+        if len(equity_df) == 0:
+            return {}
+        final = equity_df['total_equity'].iloc[-1]
+        cum_ret = (final - initial_capital) / initial_capital
+        days = len(equity_df)
+        years = days / 252
+        ann_ret = (1 + cum_ret) ** (1 / years) - 1 if years > 0 else 0
+        daily_r = equity_df['total_equity'].pct_change().dropna()
+        ann_vol = daily_r.std() * np.sqrt(252)
+        excess = daily_r - self.rfr / 252
+        sharpe = excess.mean() / excess.std() * np.sqrt(252) if excess.std() > 0 else 0
+        max_dd, dd_start, dd_end = self.max_drawdown(equity_df['total_equity'])
+        n_trades = len(trades_df)
+        win_rate, p_l_ratio, avg_hold, stop_count = 0, 0, 0, 0
+        if n_trades > 0:
+            win_rate = (trades_df['return_pct'] > 0).mean()
+            avg_win = trades_df[trades_df['return_pct'] > 0]['return_pct'].mean()
+            avg_loss = trades_df[trades_df['return_pct'] <= 0]['return_pct'].mean()
+            p_l_ratio = abs(avg_win / avg_loss) if (avg_loss != 0 and not pd.isna(avg_loss)) else 0
+            avg_hold = trades_df['holding_days'].mean() if 'holding_days' in trades_df.columns else 0
+            stop_count = int(trades_df['stop_loss_triggered'].sum()) if 'stop_loss_triggered' in trades_df.columns else 0
+        avg_units = equity_df['num_units'].mean() if 'num_units' in equity_df.columns else 0
+        max_units_h = int(equity_df['num_units'].max()) if 'num_units' in equity_df.columns else 0
+        bench_ret = (equity_df['close'].iloc[-1] - equity_df['close'].iloc[0]) / equity_df['close'].iloc[0]
+
+        latest_signal = 'HOLD'
+        if 'num_units' in equity_df.columns and equity_df['num_units'].iloc[-1] > 0:
+            latest_signal = 'HOLD'
+        else:
+            latest_signal = 'WAIT'
+
+        return {
+            'cumulative_return': float(cum_ret),
+            'annualized_return': float(ann_ret),
+            'annualized_volatility': float(ann_vol),
+            'sharpe_ratio': float(sharpe),
+            'max_drawdown': float(max_dd),
+            'max_drawdown_start': str(dd_start),
+            'max_drawdown_end': str(dd_end),
+            'win_rate': float(win_rate),
+            'profit_loss_ratio': float(p_l_ratio),
+            'total_trades': int(n_trades),
+            'avg_holding_days': float(avg_hold),
+            'avg_units': float(avg_units),
+            'max_units_held': max_units_h,
+            'stop_loss_count': stop_count,
+            'benchmark_return': float(bench_ret),
+            'excess_return': float(cum_ret - bench_ret),
+            'latest_close': float(equity_df['close'].iloc[-1]),
+            'latest_atr': float(equity_df['atr'].iloc[-1]) if 'atr' in equity_df.columns else 0,
+            'latest_signal': latest_signal,
+        }
+
+
+# =============================================================================
+# 6. 入口函数：批量运行
+# =============================================================================
+
+def run_all_stocks(data_dict, params=None):
+    """
+    对多只股票执行海龟策略回测
+
+    Parameters
+    ----------
+    data_dict : dict
+        {ts_code: DataFrame} 字典，DataFrame 需包含 date/open/high/low/close/volume 列
+    params : dict, optional
+        策略参数，默认使用标准海龟参数
+
+    Returns
+    -------
+    dict
+        {ts_code: {'metrics': {...}, 'equity': [...], 'trades': [...], 'signals': [...]}}
+    """
+    if params is None:
+        params = dict(
+            initial_capital=100000, commission_rate=0.0003, slippage=0.0001,
+            risk_fraction=0.01, add_unit_step=0.5, max_units=4,
+            stop_multiple=2.0, entry_period=20, exit_period=10, atr_period=20
+        )
+
+    engine = BacktestEngine(**params)
+    mc = MetricsCalculator()
+
+    results = {}
+    for ts_code, df in data_dict.items():
+        # 标准化列名
+        cols = [c.lower() for c in df.columns]
+        df.columns = cols
+        if 'date' not in df.columns:
+            raise KeyError(f"{ts_code}: DataFrame 缺少 date 列")
+        for col in ['open', 'high', 'low', 'close']:
+            if col not in df.columns:
+                raise KeyError(f"{ts_code}: DataFrame 缺少 {col} 列")
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.sort_values('date').reset_index(drop=True)
+
+        eq_df, tr_df = engine.run(df, ts_code)
+        metrics = mc.compute(eq_df, tr_df, engine.initial_capital)
+        metrics['ts_code'] = ts_code
+
+        # 最近 100 日信号
+        sig_df = engine.signal_gen.generate_signals(df)
+        sig_df_recent = sig_df.tail(150).copy()
+        signals = []
+        for _, row in sig_df_recent.iterrows():
+            if row['entry_signal'] == 1:
+                signals.append({'date': str(row['date']), 'type': 'ENTRY', 'price': float(row['close'])})
+            if row['exit_signal'] == 1:
+                signals.append({'date': str(row['date']), 'type': 'EXIT', 'price': float(row['close'])})
+
+        # 净值曲线 JSON
+        equity_data = {
+            'labels': eq_df['date'].tolist() if len(eq_df) > 0 else [],
+            'strategy_equity': eq_df['total_equity'].tolist() if len(eq_df) > 0 else [],
+            'benchmark_equity': (params['initial_capital'] * (1 + (eq_df['close'] - eq_df['close'].iloc[0]) / eq_df['close'].iloc[0])).tolist() if len(eq_df) > 0 else [],
+            'drawdown': ((eq_df['total_equity'] - eq_df['total_equity'].expanding().max()) / eq_df['total_equity'].expanding().max()).tolist() if len(eq_df) > 0 else [],
+            'atr': eq_df['atr'].tolist() if len(eq_df) > 0 and 'atr' in eq_df.columns else [],
+        }
+
+        results[ts_code] = {
+            'metrics': metrics,
+            'equity': equity_data,
+            'trades': tr_df.to_dict('records') if len(tr_df) > 0 else [],
+            'signals': signals,
+        }
+
+    return results
+
+
+if __name__ == '__main__':
+    print("turtle_engine.py 加载成功")
+    print("  IndicatorCalculator ✓")
+    print("  TurtleSignalGenerator ✓")
+    print("  PositionManager ✓")
+    print("  BacktestEngine ✓")
+    print("  MetricsCalculator ✓")
+    print("  run_all_stocks() ✓")

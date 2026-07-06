@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🐢 海龟法则策略看板</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+/* ============================================================
+   Dark Professional Finance Theme
+   ============================================================ */
+:root {
+  --bg: #0d1117;
+  --card: #161b22;
+  --elevated: #21262d;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text2: #8b949e;
+  --red: #ef4444;
+  --green: #22c55e;
+  --blue: #58a6ff;
+  --gold: #d2991d;
+  --purple: #a371f7;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.6; min-height: 100vh;
+}
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Layout */
+.container { max-width: 1200px; margin: 0 auto; padding: 0 16px; }
+
+/* Header */
+.header {
+  background: var(--card); border-bottom: 1px solid var(--border);
+  padding: 20px 0; position: sticky; top: 0; z-index: 100;
+}
+.header-content { display:flex; justify-content:space-between; align-items:center; }
+.header h1 { font-size: 22px; display:flex; align-items:center; gap:8px; }
+.header .badge {
+  font-size: 12px; background: var(--elevated); padding: 4px 10px;
+  border-radius: 12px; color: var(--text2);
+}
+.header .time { font-size: 13px; color: var(--text2); }
+
+/* Cards Grid */
+.cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin: 24px 0; }
+.card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px; transition: border-color .2s;
+}
+.card:hover { border-color: var(--blue); }
+.card-label { font-size: 12px; color: var(--text2); text-transform: uppercase; margin-bottom:8px; }
+.card-value { font-size: 26px; font-weight: 700; }
+.card-sub { font-size: 13px; color: var(--text2); margin-top: 4px; }
+.up { color: var(--red); }
+.down { color: var(--green); }
+
+/* Sections */
+.section { margin: 28px 0; }
+.section-title {
+  font-size: 17px; font-weight: 600; margin-bottom: 14px;
+  display: flex; align-items: center; gap: 8px;
+}
+.section-title::before { content:''; width:3px; height:18px; background:var(--blue); border-radius:2px; }
+
+/* Table */
+.table-wrap { overflow-x: auto; }
+table {
+  width: 100%; border-collapse: collapse; font-size: 14px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+}
+th, td { padding: 10px 14px; text-align: left; white-space: nowrap; }
+th {
+  background: var(--elevated); color: var(--text2); font-weight: 600;
+  font-size: 12px; text-transform: uppercase; cursor: pointer; user-select: none;
+}
+th:hover { color: var(--text); }
+th .sort-icon { margin-left: 4px; font-size: 10px; }
+td { border-top: 1px solid var(--border); }
+tr:hover td { background: var(--elevated); }
+tr.best { border-left: 3px solid var(--gold); }
+.tag {
+  display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600;
+}
+.tag-hold { background: rgba(239,68,68,.15); color: var(--red); }
+.tag-wait { background: rgba(139,148,158,.15); color: var(--text2); }
+
+/* Chart Area */
+.chart-panel { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+.chart-controls { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:10px; }
+select, button {
+  background: var(--elevated); color: var(--text); border:1px solid var(--border);
+  padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer;
+}
+button:hover, select:hover { border-color: var(--blue); }
+.btn-group { display:flex; gap:6px; }
+.btn-group button.active { background: var(--blue); border-color: var(--blue); color: #fff; }
+.chart-wrap { position: relative; height: 350px; }
+canvas { width:100% !important; }
+
+/* Timeline */
+.timeline { display:flex; flex-direction: column; gap: 8px; max-height: 400px; overflow-y: auto; }
+.timeline-item {
+  display:flex; align-items:center; gap:12px; padding:8px 12px;
+  background: var(--elevated); border-radius:6px; font-size:13px;
+}
+.timeline-icon {
+  width:28px; height:28px; border-radius:50%; display:flex; align-items:center;
+  justify-content:center; font-size:14px; font-weight:700; flex-shrink:0;
+}
+.ti-ENTRY { background: rgba(239,68,68,.2); color: var(--red); }
+.ti-ADD { background: rgba(210,153,29,.2); color: var(--gold); }
+.ti-EXIT { background: rgba(34,197,94,.2); color: var(--green); }
+.ti-STOP_LOSS { background: rgba(163,113,247,.2); color: var(--purple); }
+.timeline-date { color: var(--text2); min-width: 85px; }
+.timeline-type { font-weight: 600; min-width: 50px; }
+.timeline-price { color: var(--text2); margin-left: auto; }
+
+/* Footer */
+.footer { text-align: center; padding: 32px 0; color: var(--text2); font-size: 13px; border-top: 1px solid var(--border); margin-top: 40px; }
+
+/* Skeleton Loading */
+.skeleton { background: linear-gradient(90deg, var(--elevated) 25%, var(--border) 50%, var(--elevated) 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 6px; }
+@keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+.sk-card { height: 80px; }
+.sk-table { height: 200px; }
+.sk-chart { height: 350px; }
+
+/* Error state */
+.error-banner {
+  background: rgba(239,68,68,.1); border:1px solid rgba(239,68,68,.3);
+  border-radius:8px; padding:14px 18px; margin:20px 0; color: var(--red); font-size:14px;
+}
+
+/* Responsive */
+@media (max-width: 1024px) {
+  .cards { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 768px) {
+  .cards { grid-template-columns: repeat(2, 1fr); }
+  .header h1 { font-size: 18px; }
+  .card-value { font-size: 22px; }
+  .chart-wrap { height: 280px; }
+  table { font-size: 12px; }
+  th, td { padding: 8px 10px; }
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+<div class="container header-content">
+  <div>
+    <h1>🐢 海龟法则策略看板 <span class="badge">Turtle Trading</span></h1>
+  </div>
+  <div class="time" id="update-time">加载中...</div>
+</div>
+</header>
+
+<main class="container">
+
+<!-- Error Banner (hidden by default) -->
+<div id="error-banner" class="error-banner" style="display:none"></div>
+
+<!-- Overview Cards -->
+<section class="section">
+<div class="section-title">📊 概览</div>
+<div class="cards" id="overview-cards">
+  <div class="card"><div class="skeleton sk-card"></div></div>
+  <div class="card"><div class="skeleton sk-card"></div></div>
+  <div class="card"><div class="skeleton sk-card"></div></div>
+  <div class="card"><div class="skeleton sk-card"></div></div>
+  <div class="card"><div class="skeleton sk-card"></div></div>
+</div>
+</section>
+
+<!-- Metrics Table -->
+<section class="section">
+<div class="section-title">📋 指标对比</div>
+<div class="table-wrap">
+<table id="metrics-table">
+  <thead>
+    <tr>
+      <th data-sort="name">标的 <span class="sort-icon">⇅</span></th>
+      <th data-sort="annualized_return">年化收益 <span class="sort-icon">⇅</span></th>
+      <th data-sort="sharpe_ratio">夏普比率 <span class="sort-icon">⇅</span></th>
+      <th data-sort="max_drawdown">最大回撤 <span class="sort-icon">⇅</span></th>
+      <th data-sort="win_rate">胜率 <span class="sort-icon">⇅</span></th>
+      <th data-sort="total_trades">交易笔数 <span class="sort-icon">⇅</span></th>
+      <th>信号</th>
+    </tr>
+  </thead>
+  <tbody id="metrics-body">
+    <tr><td colspan="7"><div class="skeleton sk-table"></div></td></tr>
+  </tbody>
+</table>
+</div>
+</section>
+
+<!-- Equity Chart -->
+<section class="section">
+<div class="section-title">📈 净值曲线</div>
+<div class="chart-panel">
+  <div class="chart-controls">
+    <select id="stock-selector"></select>
+    <div class="btn-group" id="range-buttons">
+      <button data-range="60">60天</button>
+      <button data-range="120">120天</button>
+      <button data-range="200" class="active">全部</button>
+    </div>
+  </div>
+  <div class="chart-wrap"><canvas id="equity-chart"></canvas></div>
+</div>
+</section>
+
+<!-- Signal Timeline -->
+<section class="section">
+<div class="section-title">📍 信号时间轴</div>
+<div class="chart-panel">
+  <div class="timeline" id="signal-timeline">
+    <div class="skeleton" style="height:200px"></div>
+  </div>
+</div>
+</section>
+
+</main>
+
+<footer class="footer">
+  <p>🐢 海龟法则策略看板 · 基于唐奇安通道 + ATR + 风险预算</p>
+  <p>数据更新：每个工作日 8:00 CST · GitHub Actions 自动部署</p>
+  <p id="footer-time"></p>
+</footer>
+
+<script>
+// ============================================================
+// Dashboard Logic
+// ============================================================
+
+const DATA_BASE = 'data/';
+const TICKER_NAMES = {
+  '688981.SH': '中芯国际A', '002594.SZ': '比亚迪A', '600900.SH': '长江电力A',
+  '0981.HK': '中芯国际HK', '1211.HK': '比亚迪HK'
+};
+
+// --- State ---
+let state = {
+  stocks: [], selectedCode: null, currentRange: 200,
+  chart: null, sortKey: 'sharpe_ratio', sortAsc: false
+};
+
+// --- Utils ---
+function fmtPct(v) { return (v*100).toFixed(2)+'%'; }
+function upDown(v) { return v >= 0 ? 'up' : 'down'; }
+function fmtNum(v, d) { return v == null ? 'N/A' : v.toFixed(d); }
+
+async function loadJSON(path) {
+  const res = await fetch(DATA_BASE + path);
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${path}`);
+  return res.json();
+}
+
+// --- Init ---
+async function init() {
+  try {
+    const summary = await loadJSON('summary.json');
+    const updateTime = await loadJSON('update_time.json');
+    state.stocks = summary.stocks;
+
+    document.getElementById('update-time').textContent =
+      '更新 ' + (updateTime.last_update || summary.update_time || '').replace('T',' ').slice(0,16);
+    document.getElementById('footer-time').textContent =
+      '最近数据: ' + (updateTime.data_end || '') + ' · 最后更新: ' + (updateTime.last_update || summary.update_time || '');
+
+    renderCards(summary.stocks);
+    renderTable(summary.stocks);
+    populateSelector(summary.stocks);
+    if (summary.stocks.length > 0) {
+      state.selectedCode = summary.stocks[0].ts_code;
+      await loadChart(state.selectedCode);
+      await loadTimeline(state.selectedCode);
+    }
+  } catch(err) {
+    showError(err.message);
+  }
+}
+
+function showError(msg) {
+  const el = document.getElementById('error-banner');
+  el.style.display = 'block';
+  el.innerHTML = '⚠️ ' + msg + ' — <a href="javascript:location.reload()">点击重试</a>';
+}
+
+// --- Cards ---
+function renderCards(stocks) {
+  const holding = stocks.filter(s => s.latest_signal === 'HOLD').length;
+  const best = [...stocks].sort((a,b) => (b.sharpe_ratio||0) - (a.sharpe_ratio||0))[0];
+  const worst = [...stocks].sort((a,b) => (a.sharpe_ratio||0) - (b.sharpe_ratio||0))[0];
+  const avgWR = stocks.reduce((s,c) => s + (c.win_rate||0), 0) / stocks.length * 100;
+  const totalSL = stocks.reduce((s,c) => s + (c.stop_loss_count||0), 0);
+
+  const cards = [
+    ['🐢 当前持仓', holding+'/5 持仓中', '', ''],
+    ['📈 最佳标的', best ? best.name : '-', best ? fmtPct(best.annualized_return) : '', 'up'],
+    ['📉 最差标的', worst ? worst.name : '-', worst ? fmtPct(worst.annualized_return) : '', 'down'],
+    ['🎯 平均胜率', avgWR.toFixed(1)+'%', '', ''],
+    ['⚠️ 总止损', totalSL+' 次', '', '']
+  ];
+
+  const html = cards.map(c =>
+    `<div class="card">
+      <div class="card-label">${c[0]}</div>
+      <div class="card-value ${c[3]}">${c[1]}</div>
+      ${c[2] ? `<div class="card-sub ${c[3]}">${c[2]}</div>` : ''}
+    </div>`
+  ).join('');
+  document.getElementById('overview-cards').innerHTML = html;
+}
+
+// --- Table ---
+function renderTable(stocks) {
+  const bestSharpe = Math.max(...stocks.map(s => s.sharpe_ratio||0));
+  const sorted = [...stocks].sort((a,b) => {
+    let va = a[state.sortKey]??0, vb = b[state.sortKey]??0;
+    return state.sortAsc ? va - vb : vb - va;
+  });
+
+  const html = sorted.map(s => {
+    const isBest = (s.sharpe_ratio||0) >= bestSharpe - 0.001;
+    const sr = s.sharpe_ratio;
+    const ret = s.annualized_return;
+    return `<tr class="${isBest ? 'best' : ''}">
+      <td><strong>${s.ts_code}</strong> ${s.name}</td>
+      <td class="${upDown(ret)}">${fmtPct(ret)}</td>
+      <td>${sr != null ? sr.toFixed(2) : 'N/A'}</td>
+      <td class="down">${fmtPct(s.max_drawdown)}</td>
+      <td>${fmtNum(s.win_rate*100,1)}%</td>
+      <td>${s.total_trades||0}</td>
+      <td><span class="tag ${s.latest_signal==='HOLD'?'tag-hold':'tag-wait'}">${s.latest_signal==='HOLD'?'持仓中':'空仓'}</span></td>
+    </tr>`;
+  }).join('');
+  document.getElementById('metrics-body').innerHTML = html;
+
+  // Sort handlers
+  document.querySelectorAll('#metrics-table th[data-sort]').forEach(th => {
+    th.onclick = () => {
+      const key = th.dataset.sort;
+      if (state.sortKey === key) state.sortAsc = !state.sortAsc;
+      else { state.sortKey = key; state.sortAsc = false; }
+      renderTable(stocks);
+    };
+  });
+}
+
+// --- Chart ---
+function populateSelector(stocks) {
+  const sel = document.getElementById('stock-selector');
+  sel.innerHTML = stocks.map(s =>
+    `<option value="${s.ts_code}">${s.name} (${s.ts_code})</option>`
+  ).join('');
+  sel.onchange = async () => {
+    state.selectedCode = sel.value;
+    await loadChart(state.selectedCode);
+    await loadTimeline(state.selectedCode);
+  };
+
+  // Range buttons
+  document.querySelectorAll('#range-buttons button').forEach(btn => {
+    btn.onclick = () => {
+      document.querySelectorAll('#range-buttons button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.currentRange = parseInt(btn.dataset.range);
+      loadChart(state.selectedCode);
+    };
+  });
+}
+
+async function loadChart(tsCode) {
+  try {
+    const data = await loadJSON(tsCode + '_equity.json');
+    const n = Math.min(state.currentRange, data.labels.length);
+    const slice = (arr) => arr.slice(-n);
+
+    const labels = slice(data.labels).map(d => d.slice(5)); // MM-DD
+    const ctx = document.getElementById('equity-chart').getContext('2d');
+
+    if (state.chart) state.chart.destroy();
+
+    state.chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: '策略净值',
+          data: slice(data.strategy_equity),
+          borderColor: '#ef4444', backgroundColor: 'transparent',
+          borderWidth: 2, pointRadius: 0, tension: 0.1,
+        }, {
+          label: '买入持有基准',
+          data: slice(data.benchmark_equity),
+          borderColor: '#8b949e', backgroundColor: 'transparent',
+          borderWidth: 1, borderDash: [4,4], pointRadius: 0,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { labels: { color: '#8b949e', usePointStyle: true, padding:20 } },
+          tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ¥' + parseFloat(ctx.raw).toLocaleString() } }
+        },
+        scales: {
+          x: { ticks: { color: '#8b949e', maxTicksLimit: 12 }, grid: { color: 'rgba(48,54,61,.5)' } },
+          y: { ticks: { color: '#8b949e', callback: v => '¥' + (v/10000).toFixed(1)+'万' }, grid: { color: 'rgba(48,54,61,.5)' } }
+        }
+      }
+    });
+  } catch(err) {
+    document.getElementById('equity-chart').parentElement.innerHTML =
+      '<div style="text-align:center;padding:80px;color:var(--text2)">暂无净值数据</div>';
+  }
+}
+
+// --- Timeline ---
+async function loadTimeline(tsCode) {
+  try {
+    const data = await loadJSON(tsCode + '_signals.json');
+    const signals = data.signals || [];
+    if (signals.length === 0) {
+      document.getElementById('signal-timeline').innerHTML =
+        '<div style="text-align:center;padding:40px;color:var(--text2)">近期无交易信号</div>';
+      return;
+    }
+    const typeLabels = { ENTRY: '买入入场', ADD: '加仓', EXIT: '退出平仓', STOP_LOSS: '止损' };
+    const html = signals.reverse().map(s => {
+      const d = (s.date||'').slice(0,10);
+      return `<div class="timeline-item">
+        <div class="timeline-icon ti-${s.type}">${s.type==='ENTRY'?'▲':s.type==='ADD'?'◆':s.type==='EXIT'?'▼':'✕'}</div>
+        <span class="timeline-date">${d}</span>
+        <span class="timeline-type">${typeLabels[s.type]||s.type}</span>
+        <span class="timeline-price">¥${s.price?.toFixed(2)||s.price}</span>
+      </div>`;
+    }).join('');
+    document.getElementById('signal-timeline').innerHTML = html;
+  } catch(err) {
+    document.getElementById('signal-timeline').innerHTML =
+      '<div style="text-align:center;padding:40px;color:var(--text2)">信号数据加载失败</div>';
+  }
+}
+
+// --- Boot ---
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
